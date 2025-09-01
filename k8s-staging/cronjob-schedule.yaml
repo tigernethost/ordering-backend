@@ -2,7 +2,7 @@ apiVersion: batch/v1
 kind: CronJob
 metadata:
   name: ordering-scheduler
-  namespace: ordering
+  namespace: ordering-staging
 spec:
   schedule: "* * * * *"
   successfulJobsHistoryLimit: 1
