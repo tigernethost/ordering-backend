@@ -1,0 +1,27 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: ordering-scheduler
+  namespace: ordering
+spec:
+  schedule: "* * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      template:
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: scheduler
+              image: ghcr.io/OWNER/ordering-backend:latest
+              imagePullPolicy: IfNotPresent
+              command: ["bash", "-lc", "php artisan schedule:run"]
+              envFrom:
+                - configMapRef:
+                    name: ordering-config
+                - secretRef:
+                    name: ordering-secrets
+          imagePullSecrets:
+            - name: ghcr-creds

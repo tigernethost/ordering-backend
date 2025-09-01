@@ -1,0 +1,36 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ordering-queue
+  namespace: ordering
+  labels:
+    app: ordering-queue
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ordering-queue
+  template:
+    metadata:
+      labels:
+        app: ordering-queue
+    spec:
+      containers:
+        - name: queue
+          image: ghcr.io/OWNER/ordering-backend:latest
+          imagePullPolicy: IfNotPresent
+          command: ["bash", "-lc", "php artisan queue:work --sleep=3 --tries=3 --timeout=90"]
+          envFrom:
+            - configMapRef:
+                name: ordering-config
+            - secretRef:
+                name: ordering-secrets
+          resources:
+            requests:
+              cpu: "50m"
+              memory: "128Mi"
+            limits:
+              cpu: "300m"
+              memory: "256Mi"
+      imagePullSecrets:
+        - name: ghcr-creds

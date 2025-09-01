@@ -1,0 +1,44 @@
+# PHP 8.3 with Nginx ready for Laravel
+FROM webdevops/php-nginx:8.3
+
+# Set document root to Laravel public
+ENV WEB_DOCUMENT_ROOT=/app/public \
+    PHP_DISPLAY_ERRORS=0 \
+    PHP_MEMORY_LIMIT=512M \
+    PHP_MAX_EXECUTION_TIME=120 \
+    PHP_POST_MAX_SIZE=64M \
+    PHP_UPLOAD_MAX_FILESIZE=64M
+
+# System deps
+RUN apt-get update && apt-get install -y \
+    git unzip libpng-dev libjpeg-dev libfreetype6-dev libonig-dev libzip-dev \
+ && docker-php-ext-configure gd --with-freetype --with-jpeg \
+ && docker-php-ext-install gd zip pdo_mysql mbstring bcmath exif \
+ && rm -rf /var/lib/apt/lists/*
+
+# Install Composer
+COPY --from=composer:2 /usr/bin/composer /usr/bin/composer
+
+# Workdir
+WORKDIR /app
+
+# Copy app
+COPY . /app
+
+# Permissions for storage and cache
+RUN chown -R application:application /app/storage /app/bootstrap/cache \
+ && chmod -R ug+rwX /app/storage /app/bootstrap/cache
+
+# Switch to non-root user provided by base image
+USER application
+
+# Install PHP dependencies (no-dev for production image)
+RUN composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction || true
+
+# Ensure Laravel storage link (ignored if exists)
+RUN php artisan storage:link || true
+
+# Expose port 80 from base nginx
+EXPOSE 80
+
+# Start is handled by base image (supervisord running php-fpm + nginx)

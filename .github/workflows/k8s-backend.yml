@@ -1,0 +1,108 @@
+name: Backend K8s CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  workflow_dispatch:
+
+env:
+  IMAGE_NAME: ghcr.io/OWNER/ordering-backend
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GHCR_TOKEN || github.token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./
+          file: ./Dockerfile.k8s
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+            ${{ env.IMAGE_NAME }}:latest
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup kubectl
+        uses: azure/setup-kubectl@v4
+        with:
+          version: 'latest'
+
+      - name: Configure kubeconfig
+        run: |
+          mkdir -p ~/.kube
+          echo "${{ secrets.KUBE_CONFIG }}" | base64 -d > ~/.kube/config
+
+      - name: Create/Update GHCR imagePullSecret
+        run: |
+          kubectl -n ordering delete secret ghcr-creds --ignore-not-found
+          kubectl -n ordering create secret docker-registry ghcr-creds \
+            --docker-server=ghcr.io \
+            --docker-username="${{ github.actor }}" \
+            --docker-password="${{ secrets.GHCR_TOKEN || github.token }}" \
+            --docker-email="noreply@github.com"
+
+      - name: Apply base manifests
+        run: |
+          kubectl apply -f k8s/namespace.yaml
+          kubectl -n ordering apply -f k8s/configmap.yaml
+          kubectl -n ordering apply -f k8s/secret.example.yaml
+          kubectl -n ordering apply -f k8s/service-app.yaml
+          kubectl -n ordering apply -f k8s/deployment-app.yaml
+          kubectl -n ordering apply -f k8s/deployment-queue.yaml
+          kubectl -n ordering apply -f k8s/cronjob-schedule.yaml
+          kubectl -n ordering apply -f k8s/ingress.yaml
+
+      - name: Update images to new build
+        run: |
+          kubectl -n ordering set image deployment/ordering-app app=${{ env.IMAGE_NAME }}:${{ github.sha }}
+          kubectl -n ordering set image deployment/ordering-queue queue=${{ env.IMAGE_NAME }}:${{ github.sha }}
+          kubectl -n ordering set image cronjob/ordering-scheduler scheduler=${{ env.IMAGE_NAME }}:${{ github.sha }}
+
+      - name: Wait for rollout
+        run: |
+          kubectl -n ordering rollout status deployment/ordering-app --timeout=180s
+          kubectl -n ordering rollout status deployment/ordering-queue --timeout=180s
+
+      - name: Run migrations
+        run: |
+          set -e
+          kubectl -n ordering delete pod migrate --ignore-not-found
+          kubectl -n ordering run migrate --image=${{ env.IMAGE_NAME }}:${{ github.sha }} --restart=Never -- bash -lc "php artisan migrate --force"
+          kubectl -n ordering wait --for=condition=Ready pod/migrate --timeout=120s || true
+          kubectl -n ordering logs pod/migrate --tail=200 || true
+          kubectl -n ordering delete pod migrate --ignore-not-found
+
+      - name: Run seeders (optional)
+        if: ${{ vars.RUN_SEEDERS == 'true' }}
+        run: |
+          set -e
+          kubectl -n ordering delete pod seed --ignore-not-found
+          kubectl -n ordering run seed --image=${{ env.IMAGE_NAME }}:${{ github.sha }} --restart=Never -- bash -lc "php artisan db:seed --force"
+          kubectl -n ordering wait --for=condition=Ready pod/seed --timeout=120s || true
+          kubectl -n ordering logs pod/seed --tail=200 || true
+          kubectl -n ordering delete pod seed --ignore-not-found
