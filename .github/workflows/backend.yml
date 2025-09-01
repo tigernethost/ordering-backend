@@ -1,0 +1,113 @@
+name: Backend CI/CD
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+jobs:
+  test:
+    name: Backend - Test (PHP 8.3)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup PHP
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          tools: composer:v2
+          extensions: mbstring, intl, pdo_mysql, bcmath, gd
+          coverage: none
+
+      - name: Get Composer Cache Directory
+        id: composer-cache
+        run: |
+          echo "dir=$(composer config cache-dir)" >> $GITHUB_OUTPUT
+
+      - name: Cache Composer dependencies
+        uses: actions/cache@v4
+        with:
+          path: ${{ steps.composer-cache.outputs.dir }}
+          key: ${{ runner.os }}-composer-${{ hashFiles('composer.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-composer-
+
+      - name: Install dependencies
+        run: composer install --prefer-dist --no-interaction
+
+      - name: Prepare app key (CI only)
+        run: |
+          cp -n .env.example .env || true
+          php -r "file_exists('.env') || copy('.env.example', '.env');"
+          php artisan key:generate
+
+      - name: Run tests if present
+        if: ${{ hashFiles('tests/**/*.php') != '' }}
+        run: php artisan test --no-ansi
+
+  deploy:
+    name: Backend - Deploy to DigitalOcean
+    needs: test
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          touch ~/.ssh/known_hosts
+          ssh-keyscan -p "${{ secrets.SSH_PORT }}" "${{ secrets.SSH_HOST }}" >> ~/.ssh/known_hosts
+
+      - name: Rsync source to server
+        run: |
+          rsync -az --delete \
+            --exclude ".git" \
+            --exclude "vendor" \
+            --exclude ".env" \
+            --exclude "storage/*" \
+            ./ ${{ secrets.SSH_USER }}@${{ secrets.SSH_HOST }}:${{ secrets.DEPLOY_PATH }}/
+
+      - name: Run remote deploy commands
+        env:
+          SSH_USER: ${{ secrets.SSH_USER }}
+          SSH_HOST: ${{ secrets.SSH_HOST }}
+          SSH_PORT: ${{ secrets.SSH_PORT }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_PATH }}
+          PHP_BIN: ${{ secrets.PHP_BIN }}
+        run: |
+          SSH_CMD='set -e
+          cd "$DEPLOY_PATH"
+          # Ensure .env exists and has APP_KEY; generate if missing
+          if [ ! -f .env ]; then echo "ERROR: .env not found at $DEPLOY_PATH" >&2; exit 1; fi
+          if ! grep -q "^APP_KEY=" .env || [ -z "$(grep "^APP_KEY=" .env | cut -d= -f2)" ]; then
+            (${PHP_BIN:-php} artisan key:generate --force) || true
+          fi
+
+          # Composer install without dev
+          composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
+
+          # Laravel caches and migrations
+          ${PHP_BIN:-php} artisan migrate --force
+          ${PHP_BIN:-php} artisan db:seed --force
+          ${PHP_BIN:-php} artisan config:cache
+          ${PHP_BIN:-php} artisan route:cache || true
+          ${PHP_BIN:-php} artisan view:cache || true
+          ${PHP_BIN:-php} artisan storage:link || true
+          ${PHP_BIN:-php} artisan queue:restart || true
+
+          # Permissions (optional, adjust user:group)
+          sudo chown -R www-data:www-data storage bootstrap/cache || true
+          sudo find storage -type d -exec chmod 775 {} \; || true
+          sudo find storage -type f -exec chmod 664 {} \; || true
+          sudo chmod -R 775 bootstrap/cache || true
+          '
+          ssh -p "$SSH_PORT" "$SSH_USER@$SSH_HOST" "$SSH_CMD"
