@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1.6
 # PHP 8.3 with Nginx ready for Laravel
 FROM webdevops/php-nginx:8.3
 
@@ -33,7 +34,11 @@ RUN chown -R application:application /app/storage /app/bootstrap/cache \
 USER application
 
 # Install PHP dependencies (no-dev for production image)
-RUN composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction || true
+# Provide Composer auth (e.g., Backpack Satis credentials) at build-time via BuildKit secret
+# Expect a repo secret named COMPOSER_AUTH_JSON passed as build secret
+# This prevents leaking credentials into the image layers
+RUN --mount=type=secret,id=composer_auth,target=/home/application/.composer/auth.json \
+    composer install --no-dev --prefer-dist --optimize-autoloader --no-interaction
 
 # Ensure Laravel storage link (ignored if exists)
 RUN php artisan storage:link || true

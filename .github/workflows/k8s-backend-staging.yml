@@ -44,6 +44,8 @@ jobs:
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.sha }}
             ${{ env.IMAGE_NAME }}:staging
+          secrets: |
+            id=composer_auth,env=COMPOSER_AUTH_JSON
 
   deploy:
     needs: build-and-push
@@ -77,7 +79,7 @@ jobs:
         run: |
           kubectl apply -f k8s-staging/namespace.yaml
           kubectl -n ordering-staging apply -f k8s-staging/configmap.yaml
-          kubectl -n ordering-staging apply -f k8s-staging/secret.example.yaml
+          # Skip applying example secrets; real secrets should be managed out-of-band
           kubectl -n ordering-staging apply -f k8s-staging/service-app.yaml
           kubectl -n ordering-staging apply -f k8s-staging/deployment-app.yaml
           kubectl -n ordering-staging apply -f k8s-staging/deployment-queue.yaml
